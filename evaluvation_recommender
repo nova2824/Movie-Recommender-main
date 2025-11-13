@@ -1,0 +1,102 @@
+import numpy as np
+import pandas as pd
+from sklearn.metrics.pairwise import linear_kernel
+from typing import List, Optional
+import random
+import math
+
+def _ensure_array(x):
+    """Convert np.matrix to ndarray; leave sparse as-is."""
+    try:
+        from scipy.sparse import issparse
+        if issparse(x):
+            return x
+    except:
+        pass
+    return np.asarray(x)
+
+def _compute_topk(tfidf_matrix, k: int):
+    sims = linear_kernel(tfidf_matrix, tfidf_matrix)
+    np.fill_diagonal(sims, -np.inf)
+    topk = np.argsort(sims, axis=1)[:, ::-1][:, :k]
+    return topk, sims
+
+def evaluate_recommender(
+        df: pd.DataFrame,
+        tfidf_matrix,
+        ks: List[int] = [5, 10, 20],
+        field: str = "genres_list",
+        sample_frac: Optional[float] = None,
+        random_state: int = 42
+    ) -> pd.DataFrame:
+
+    if field not in df.columns:
+        raise ValueError(f"Column '{field}' not found in DataFrame.")
+
+    tfidf_matrix = _ensure_array(tfidf_matrix)
+
+    n = len(df)
+    indices = list(range(n))
+
+    if sample_frac and 0 < sample_frac < 1:
+        random.seed(random_state)
+        sample_n = max(1, int(sample_frac * n))
+        indices = random.sample(indices, sample_n)
+
+    truth_sets = []
+    for _, row in df.iterrows():
+        vals = row.get(field, [])
+        truth_sets.append(set(str(v) for v in vals))
+
+    max_k = max(ks)
+    topk_matrix, _ = _compute_topk(tfidf_matrix, max_k)
+
+    results = []
+
+    for k in ks:
+        precisions = []
+        recalls = []
+        hits = []
+
+        for i in indices:
+            true_items = truth_sets[i]
+
+            if not true_items:
+                precisions.append(np.nan)
+                recalls.append(np.nan)
+                hits.append(0)
+                continue
+
+            recommended = topk_matrix[i, :k]
+
+            relevant_count = sum(
+                1 for rec_idx in recommended
+                if truth_sets[rec_idx] & true_items
+            )
+
+            precisions.append(relevant_count / k)
+
+            total_relevant = sum(
+                1 for j in range(n)
+                if j != i and (truth_sets[j] & true_items)
+            )
+
+            recall = relevant_count / total_relevant if total_relevant else np.nan
+            recalls.append(recall)
+
+            hits.append(1 if relevant_count > 0 else 0)
+
+        precision = np.nanmean(precisions)
+        recall = np.nanmean(recalls)
+        f1 = 2 * precision * recall / (precision + recall) if precision + recall > 0 else np.nan
+        hit_rate = np.nanmean(hits)
+
+        results.append({
+            "k": k,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "hit_rate": hit_rate
+        })
+
+    return pd.DataFrame(results)
